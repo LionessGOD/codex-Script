@@ -1,0 +1,1666 @@
+-- ////////////////////////////////////////////////////////////////////////////
+-- FAKE ROBUX SYSTEM - COMPLETE WITH ALL 4 UIS + REAL BALANCE UPDATE BY CODEX
+-- ////////////////////////////////////////////////////////////////////////////
+
+local Players            = game:GetService("Players")
+local TweenService       = game:GetService("TweenService")
+local SoundService       = game:GetService("SoundService")
+local UserInputService   = game:GetService("UserInputService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local CollectionService  = game:GetService("CollectionService")
+local CoreGui            = game:GetService("CoreGui")
+
+local player    = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ============================================================================
+-- PERSISTENT BALANCE STORAGE
+-- ============================================================================
+local STORAGE_KEY = "FakeDonate_Balance_" .. player.UserId
+
+local function saveBalance(amount)
+    local success, err = pcall(function()
+        writefile(STORAGE_KEY .. ".txt", tostring(amount))
+    end)
+    if not success then
+        warn("[FakeDonate] Save error:", err)
+    end
+end
+
+local function loadBalance()
+    local success, result = pcall(function()
+        if isfile(STORAGE_KEY .. ".txt") then
+            local content = readfile(STORAGE_KEY .. ".txt")
+            return tonumber(content) or 900000000000
+        end
+        return 900000000000
+    end)
+    return success and result or 900000000000
+end
+
+local CONFIG = {
+    balance            = loadBalance(),
+    enableSounds       = true,
+    updateStandBalance = true,
+    uiChoice           = "RobloxOriginal",
+    notifChoice        = "Both",
+    debugLogs          = false
+}
+
+local SOUNDS = {
+    Purchase = "rbxassetid://6895079853",
+    Click    = "rbxassetid://14674193849",
+    Gift     = "rbxassetid://14674229054"
+}
+
+local ROBUX_ICON = "rbxasset://textures/ui/common/robux@3x.png"
+
+local isMenuOpen = false
+local processedFrames = {}
+local currentPurchase = {name="Donation", price=0, username="Player", assetId=nil, imageId=nil}
+
+local LOAD_DARK  = Color3.fromRGB(0, 36, 135)
+local LOAD_FINAL = Color3.fromRGB(63, 105, 255)
+
+-- ============================================================================
+-- UTILS
+-- ============================================================================
+local function debugLog(...)
+    if CONFIG.debugLogs then warn("[FakeDonate]", ...) end
+end
+
+local function playSound(name, vol)
+    if not CONFIG.enableSounds then return end
+    pcall(function()
+        local s = Instance.new("Sound")
+        s.SoundId = SOUNDS[name] or ""
+        s.Volume = vol or 1
+        s.Parent = SoundService
+        s:Play()
+        task.delay(3, function() pcall(function() s:Destroy() end) end)
+    end)
+end
+
+local function formatNumber(n)
+    local s = tostring(math.floor(n))
+    return s:reverse():gsub("(%d%d%d)","%1,"):reverse():gsub("^,","")
+end
+
+local function closeRealPrompts()
+    task.spawn(function()
+        for _ = 1, 10 do
+            pcall(function()
+                for _, g in pairs(CoreGui:GetChildren()) do
+                    if g:IsA("ScreenGui") then
+                        local low = g.Name:lower()
+                        if low:find("purchase") or low:find("prompt") or low:find("marketplace") or low:find("commerce") then
+                            g.Enabled = false
+                            task.delay(0.05, function() pcall(function() g:Destroy() end) end)
+                        end
+                    end
+                end
+            end)
+            task.wait(0.08)
+        end
+    end)
+end
+
+local function updateStandRaised(username, amount)
+    if not CONFIG.updateStandBalance then return end
+    task.spawn(function()
+        pcall(function()
+            local boothUI = playerGui:FindFirstChild("BoothUI")
+            if not boothUI then return end
+            local details = boothUI:FindFirstChild("Details")
+            if not details then return end
+            local raised = details:FindFirstChild("Raised")
+            if raised then
+                local cur = tonumber((raised.Text or "0"):gsub("%D","")) or 0
+                raised.Text = formatNumber(cur + amount) .. " raised"
+            end
+        end)
+    end)
+end
+
+local function updateDonatedLeaderboard(amount)
+    pcall(function()
+        local customCoreGui = playerGui:FindFirstChild("CustomCoreGui")
+        if not customCoreGui then return end
+        local playerlist = customCoreGui:FindFirstChild("Playerlist")
+        if not playerlist then return end
+        local scrollingFrame = playerlist:FindFirstChild("ScrollingFrame")
+        if not scrollingFrame then return end
+        local userId = tostring(player.UserId)
+        local userFrame = scrollingFrame:FindFirstChild("User" .. userId)
+        if not userFrame then return end
+        local stats = userFrame:FindFirstChild("Stats")
+        if not stats then return end
+        local donated = stats:FindFirstChild("Donated")
+        if not donated then return end
+        local cleanedText = string.gsub(donated.Text, "[^%d,]", "")
+        local cleaned = string.gsub(cleanedText, ",", "")
+        local currentDonated = tonumber(cleaned) or 0
+        local newDonated = currentDonated + amount
+        for _, child in ipairs(donated:GetChildren()) do child:Destroy() end
+        donated.Text = ""
+        local robuxIcon = Instance.new("ImageLabel")
+        robuxIcon.Size = UDim2.new(0, 16, 0, 16)
+        robuxIcon.Position = UDim2.new(0, 0, 0.5, -8)
+        robuxIcon.BackgroundTransparency = 1
+        robuxIcon.Image = ROBUX_ICON
+        robuxIcon.ImageColor3 = Color3.fromRGB(59, 255, 56)
+        robuxIcon.Parent = donated
+        local amountText = Instance.new("TextLabel")
+        amountText.Size = UDim2.new(1, -20, 1, 0)
+        amountText.Position = UDim2.new(0, 20, 0, 0)
+        amountText.BackgroundTransparency = 1
+        amountText.Text = formatNumber(newDonated)
+        amountText.TextColor3 = Color3.fromRGB(59, 255, 56)
+        amountText.Font = Enum.Font.GothamSemibold
+        amountText.TextSize = 14
+        amountText.TextXAlignment = Enum.TextXAlignment.Left
+        amountText.Parent = donated
+    end)
+end
+
+-- ============================================================================
+-- ROOT GUI
+-- ============================================================================
+local mainGui = Instance.new("ScreenGui")
+mainGui.Name = "FakeDonateSystem"
+mainGui.DisplayOrder = 10000
+mainGui.IgnoreGuiInset = true
+mainGui.ResetOnSpawn = false
+mainGui.Parent = playerGui
+
+-- ============================================================================
+-- RB PANEL WITH BALANCE UPDATE
+-- ============================================================================
+local panel = Instance.new("Frame")
+panel.Size = UDim2.new(0, 260, 0, 180)
+panel.Position = UDim2.new(0, 20, 1, -200)
+panel.BackgroundColor3 = Color3.fromRGB(30,30,35)
+panel.Active = true
+panel.Draggable = true
+panel.Parent = mainGui
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0,8)
+Instance.new("UIStroke", panel).Color = Color3.fromRGB(60,60,70)
+
+local panelTitle = Instance.new("TextLabel")
+panelTitle.BackgroundTransparency = 1
+panelTitle.Size = UDim2.new(1,0,0,30)
+panelTitle.Text = "Made By RB"
+panelTitle.Font = Enum.Font.GothamBold
+panelTitle.TextSize = 14
+panelTitle.TextColor3 = Color3.new(1,1,1)
+panelTitle.Parent = panel
+
+local currentBalLabel = Instance.new("TextLabel")
+currentBalLabel.BackgroundTransparency = 1
+currentBalLabel.Size = UDim2.new(1,-20,0,20)
+currentBalLabel.Position = UDim2.new(0,10,0,35)
+currentBalLabel.Text = "Current Balance: " .. formatNumber(CONFIG.balance)
+currentBalLabel.Font = Enum.Font.Gotham
+currentBalLabel.TextSize = 12
+currentBalLabel.TextColor3 = Color3.fromRGB(200,200,200)
+currentBalLabel.TextXAlignment = Enum.TextXAlignment.Left
+currentBalLabel.Parent = panel
+
+local balInput = Instance.new("TextBox")
+balInput.Size = UDim2.new(1,-20,0,32)
+balInput.Position = UDim2.new(0,10,0,60)
+balInput.BackgroundColor3 = Color3.fromRGB(45,45,55)
+balInput.Font = Enum.Font.Gotham
+balInput.TextSize = 14
+balInput.TextColor3 = Color3.new(1,1,1)
+balInput.PlaceholderText = "New balance..."
+balInput.Text = ""
+balInput.ClearTextOnFocus = false
+balInput.Parent = panel
+Instance.new("UICorner", balInput).CornerRadius = UDim.new(0,6)
+
+local updBtn = Instance.new("TextButton")
+updBtn.Size = UDim2.new(1,-20,0,36)
+updBtn.Position = UDim2.new(0,10,0,100)
+updBtn.BackgroundColor3 = Color3.fromRGB(0,170,255)
+updBtn.Text = "Update Balance"
+updBtn.TextColor3 = Color3.new(1,1,1)
+updBtn.Font = Enum.Font.GothamBold
+updBtn.TextSize = 14
+updBtn.Parent = panel
+Instance.new("UICorner", updBtn).CornerRadius = UDim.new(0,6)
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.BackgroundTransparency = 1
+statusLabel.Size = UDim2.new(1,-20,0,20)
+statusLabel.Position = UDim2.new(0,10,0,145)
+statusLabel.Text = ""
+statusLabel.Font = Enum.Font.GothamBold
+statusLabel.TextSize = 11
+statusLabel.TextColor3 = Color3.fromRGB(100,255,100)
+statusLabel.Parent = panel
+
+local function refreshBalDisplay()
+    currentBalLabel.Text = "Current Balance: " .. formatNumber(CONFIG.balance)
+    saveBalance(CONFIG.balance)
+    
+    pcall(function()
+        local rnbfGui = playerGui:FindFirstChild("RNBF_Prompt")
+        if rnbfGui then
+            for _, desc in pairs(rnbfGui:GetDescendants()) do
+                if desc:IsA("TextLabel") and desc.Name == "TopBalText" then
+                    desc.Text = formatNumber(CONFIG.balance)
+                end
+            end
+        end
+    end)
+    pcall(function()
+        local roGui = playerGui:FindFirstChild("RO_Prompt")
+        if roGui then
+            for _, desc in pairs(roGui:GetDescendants()) do
+                if desc:IsA("TextLabel") and desc.Name == "TopBalText" then
+                    desc.Text = formatNumber(CONFIG.balance)
+                end
+            end
+        end
+    end)
+end
+
+updBtn.MouseButton1Click:Connect(function()
+    playSound("Click",0.7)
+    local inputText = balInput.Text:gsub(",",""):gsub("%s","")
+    local v = tonumber(inputText)
+    
+    if v and v >= 0 then 
+        CONFIG.balance = v
+        refreshBalDisplay()
+        balInput.Text = ""
+        statusLabel.Text = "✓ Balance updated: " .. formatNumber(v)
+        statusLabel.TextColor3 = Color3.fromRGB(100,255,100)
+        debugLog("Balance updated:", v)
+        
+        task.delay(3, function()
+            statusLabel.Text = ""
+        end)
+    else
+        statusLabel.Text = "✗ Invalid number!"
+        statusLabel.TextColor3 = Color3.fromRGB(255,100,100)
+        task.delay(3, function()
+            statusLabel.Text = ""
+        end)
+    end
+end)
+
+-- ============================================================================
+-- SENT GIFT NOTIFICATION (PINK)
+-- ============================================================================
+local giftFrame = Instance.new("Frame")
+giftFrame.Size = UDim2.new(0,0,0,46)
+giftFrame.Position = UDim2.new(0.5,0,0.72,0)
+giftFrame.AnchorPoint = Vector2.new(0.5,0.5)
+giftFrame.BackgroundColor3 = Color3.fromRGB(255,20,147)
+giftFrame.BackgroundTransparency = 1
+giftFrame.ClipsDescendants = true
+giftFrame.Parent = mainGui
+Instance.new("UICorner", giftFrame).CornerRadius = UDim.new(0,23)
+
+local giftIcon = Instance.new("ImageLabel")
+giftIcon.BackgroundTransparency = 1
+giftIcon.Size = UDim2.new(0,28,0,28)
+giftIcon.Position = UDim2.new(0,12,0.5,-14)
+giftIcon.Image = "rbxthumb://type=Asset&id=114634407468044&w=150&h=150"
+giftIcon.Parent = giftFrame
+
+local giftText = Instance.new("TextLabel")
+giftText.BackgroundTransparency = 1
+giftText.Size = UDim2.new(0,0,1,0)
+giftText.Position = UDim2.new(0,46,0,0)
+giftText.Font = Enum.Font.GothamBold
+giftText.TextSize = 17
+giftText.TextColor3 = Color3.new(1,1,1)
+giftText.TextXAlignment = Enum.TextXAlignment.Left
+giftText.AutomaticSize = Enum.AutomaticSize.X
+giftText.Text = "sent gift!"
+giftText.Parent = giftFrame
+
+local function showSentGift()
+    playSound("Gift",1)
+    giftText.Text = "sent gift!"
+    giftFrame.BackgroundTransparency = 0
+    giftFrame.Size = UDim2.new(0,0,0,46)
+    task.wait(0.05)
+    local textWidth = giftText.AbsoluteSize.X
+    local totalWidth = 46 + textWidth + 16
+    TweenService:Create(giftFrame, TweenInfo.new(0.4, Enum.EasingStyle.Back), {Size = UDim2.new(0,totalWidth,0,46)}):Play()
+    task.delay(3, function()
+        TweenService:Create(giftFrame, TweenInfo.new(0.3), {Size = UDim2.new(0,0,0,46)}):Play()
+        task.delay(0.3, function() giftFrame.BackgroundTransparency = 1 end)
+    end)
+end
+
+-- ============================================================================
+-- GREEN NOTIFICATION
+-- ============================================================================
+local function showGreenNotif(price, username)
+    local g = Instance.new("ScreenGui")
+    g.ResetOnSpawn = false
+    g.IgnoreGuiInset = true
+    g.DisplayOrder = 12000
+    g.Parent = playerGui
+
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(0,440,0,56)
+    f.Position = UDim2.new(0.5,-220,1,-20)
+    f.BackgroundColor3 = Color3.fromRGB(23,255,77)
+    f.Parent = g
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0,28)
+
+    local iL = Instance.new("ImageLabel")
+    iL.BackgroundTransparency = 1
+    iL.Size = UDim2.new(0,26,0,26)
+    iL.Position = UDim2.new(0,18,0.5,-13)
+    iL.Image = ROBUX_ICON
+    iL.ImageColor3 = Color3.fromRGB(19,90,30)
+    iL.Parent = f
+
+    local t = Instance.new("TextLabel")
+    t.BackgroundTransparency = 1
+    t.Size = UDim2.new(1,-90,1,0)
+    t.Position = UDim2.new(0,55,0,0)
+    t.Font = Enum.Font.GothamBlack
+    t.TextSize = 20
+    t.TextColor3 = Color3.fromRGB(19,90,30)
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Text = "you donated "..formatNumber(price).." to @"..(username or "Player")
+    t.Parent = f
+
+    local iR = iL:Clone()
+    iR.Position = UDim2.new(1,-44,0.5,-13)
+    iR.Parent = f
+
+    TweenService:Create(f, TweenInfo.new(0.3, Enum.EasingStyle.Back), {Position = UDim2.new(0.5,-220,0.82,0)}):Play()
+    task.delay(3, function()
+        TweenService:Create(f, TweenInfo.new(0.2), {Position = UDim2.new(0.5,-220,1,60)}):Play()
+        task.delay(0.25, function() g:Destroy() end)
+    end)
+end
+
+local function fireNotifications(username, price)
+    local c = CONFIG.notifChoice
+    if c == "Both" then
+        showSentGift()
+        task.delay(0.5, function() showGreenNotif(price, username) end)
+    elseif c == "Rose" then
+        showSentGift()
+    elseif c == "Verte" or c == "Green" then
+        showGreenNotif(price, username)
+    end
+end
+
+-- ============================================================================
+-- PROMPTS - ALL 4 UIS
+-- ============================================================================
+local prompts = {}
+
+-- ===================== 1. ROBLOX CLONE ======================================
+do
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "RC_Prompt"
+    gui.DisplayOrder = 10005
+    gui.IgnoreGuiInset = true
+    gui.ResetOnSpawn = false
+    gui.Parent = playerGui
+
+    local modal = Instance.new("Frame")
+    modal.BackgroundColor3 = Color3.new(0,0,0)
+    modal.BackgroundTransparency = 1
+    modal.Size = UDim2.new(1,0,1,0)
+    modal.Visible = false
+    modal.Parent = gui
+
+    local trap = Instance.new("TextButton")
+    trap.BackgroundTransparency = 1
+    trap.Size = UDim2.new(1,0,1,0)
+    trap.Text = ""
+    trap.Parent = modal
+
+    local buyF = Instance.new("Frame")
+    buyF.Size = UDim2.new(0,450,0,270)
+    buyF.Position = UDim2.new(0.5,-225,-0.3,0)
+    buyF.BackgroundColor3 = Color3.fromRGB(39,41,48)
+    buyF.Visible = false
+    buyF.Parent = gui
+    Instance.new("UICorner", buyF).CornerRadius = UDim.new(0,12)
+
+    local tit = Instance.new("TextLabel")
+    tit.BackgroundTransparency = 1
+    tit.Size = UDim2.new(1,-20,0,44)
+    tit.Position = UDim2.new(0,10,0,6)
+    tit.Font = Enum.Font.GothamBold
+    tit.TextSize = 24
+    tit.TextColor3 = Color3.new(1,1,1)
+    tit.Text = "Purchase Item"
+    tit.Parent = buyF
+
+    local ln = Instance.new("Frame")
+    ln.Size = UDim2.new(1,-20,0,1)
+    ln.Position = UDim2.new(0,10,0,48)
+    ln.BackgroundColor3 = Color3.fromRGB(60,60,70)
+    ln.Parent = buyF
+
+    local xBtn = Instance.new("TextButton")
+    xBtn.BackgroundTransparency = 1
+    xBtn.Size = UDim2.new(0,40,0,40)
+    xBtn.Position = UDim2.new(0,5,0,0)
+    xBtn.Font = Enum.Font.GothamBold
+    xBtn.TextSize = 28
+    xBtn.TextColor3 = Color3.fromRGB(200,200,200)
+    xBtn.Text = "X"
+    xBtn.Parent = buyF
+
+    local img = Instance.new("ImageLabel")
+    img.BackgroundTransparency = 1
+    img.Size = UDim2.new(0,96,0,96)
+    img.Position = UDim2.new(0,25,0,72)
+    img.Parent = buyF
+
+    local nameL = Instance.new("TextLabel")
+    nameL.BackgroundTransparency = 1
+    nameL.Size = UDim2.new(1,-150,0,50)
+    nameL.Position = UDim2.new(0,140,0,95)
+    nameL.Font = Enum.Font.GothamBold
+    nameL.TextSize = 22
+    nameL.TextColor3 = Color3.new(1,1,1)
+    nameL.TextXAlignment = Enum.TextXAlignment.Left
+    nameL.TextWrapped = true
+    nameL.Parent = buyF
+
+    local buyBtn = Instance.new("TextButton")
+    buyBtn.Size = UDim2.new(0.88,0,0,50)
+    buyBtn.Position = UDim2.new(0.06,0,1,-95)
+    buyBtn.BackgroundColor3 = LOAD_DARK
+    buyBtn.AutoButtonColor = false
+    buyBtn.Text = ""
+    buyBtn.ClipsDescendants = true
+    buyBtn.Parent = buyF
+    Instance.new("UICorner", buyBtn).CornerRadius = UDim.new(0,8)
+
+    local loadBar = Instance.new("Frame")
+    loadBar.BackgroundColor3 = Color3.fromRGB(45,68,152)
+    loadBar.Size = UDim2.new(0,0,1,0)
+    loadBar.ZIndex = 1
+    loadBar.Parent = buyBtn
+    Instance.new("UICorner", loadBar).CornerRadius = UDim.new(0,8)
+
+    local bIcon = Instance.new("ImageLabel")
+    bIcon.BackgroundTransparency = 1
+    bIcon.Size = UDim2.new(0,26,0,26)
+    bIcon.Position = UDim2.new(0.5,-34,0.5,-13)
+    bIcon.Image = ROBUX_ICON
+    bIcon.ZIndex = 2
+    bIcon.Parent = buyBtn
+
+    local bAmt = Instance.new("TextLabel")
+    bAmt.BackgroundTransparency = 1
+    bAmt.Size = UDim2.new(0,100,1,0)
+    bAmt.Position = UDim2.new(0.5,-5,0,0)
+    bAmt.Font = Enum.Font.GothamBold
+    bAmt.TextSize = 20
+    bAmt.TextColor3 = Color3.new(1,1,1)
+    bAmt.TextXAlignment = Enum.TextXAlignment.Left
+    bAmt.ZIndex = 2
+    bAmt.Parent = buyBtn
+
+    local balRow = Instance.new("Frame")
+    balRow.BackgroundTransparency = 1
+    balRow.Size = UDim2.new(0.88,0,0,24)
+    balRow.Position = UDim2.new(0.06,0,1,-40)
+    balRow.Parent = buyF
+
+    local balLbl = Instance.new("TextLabel")
+    balLbl.BackgroundTransparency = 1
+    balLbl.Size = UDim2.new(0,178,1,0)
+    balLbl.Font = Enum.Font.GothamSemibold
+    balLbl.TextSize = 12
+    balLbl.TextColor3 = Color3.fromRGB(185,185,185)
+    balLbl.TextXAlignment = Enum.TextXAlignment.Left
+    balLbl.Text = "Your balance will be "
+    balLbl.Parent = balRow
+
+    local balIc = Instance.new("ImageLabel")
+    balIc.BackgroundTransparency = 1
+    balIc.Size = UDim2.new(0,18,0,18)
+    balIc.Position = UDim2.new(0,178,0,3)
+    balIc.Image = ROBUX_ICON
+    balIc.Parent = balRow
+
+    local balAmt = Instance.new("TextLabel")
+    balAmt.BackgroundTransparency = 1
+    balAmt.Size = UDim2.new(1,-210,1,0)
+    balAmt.Position = UDim2.new(0,200,0,0)
+    balAmt.Font = Enum.Font.GothamBold
+    balAmt.TextSize = 12
+    balAmt.TextColor3 = Color3.new(1,1,1)
+    balAmt.TextXAlignment = Enum.TextXAlignment.Left
+    balAmt.Parent = balRow
+
+    local sucF = Instance.new("Frame")
+    sucF.Size = UDim2.new(0,450,0,240)
+    sucF.Position = UDim2.new(0.5,-225,-0.3,0)
+    sucF.BackgroundColor3 = Color3.fromRGB(33,33,38)
+    sucF.Visible = false
+    sucF.Parent = gui
+    Instance.new("UICorner", sucF).CornerRadius = UDim.new(0,12)
+
+    local sucTit = Instance.new("TextLabel")
+    sucTit.BackgroundTransparency = 1
+    sucTit.Size = UDim2.new(1,-20,0,44)
+    sucTit.Position = UDim2.new(0,10,0,6)
+    sucTit.Font = Enum.Font.GothamBold
+    sucTit.TextSize = 22
+    sucTit.TextColor3 = Color3.new(1,1,1)
+    sucTit.Text = "Purchase completed"
+    sucTit.TextXAlignment = Enum.TextXAlignment.Left
+    sucTit.Parent = sucF
+
+    local sucLn = ln:Clone()
+    sucLn.Parent = sucF
+
+    local sucIco = Instance.new("ImageLabel")
+    sucIco.BackgroundTransparency = 1
+    sucIco.Size = UDim2.new(0,72,0,72)
+    sucIco.Position = UDim2.new(0.5,-36,0,70)
+    sucIco.Image = "rbxassetid://11419719540"
+    sucIco.Parent = sucF
+
+    local sucMsg = Instance.new("TextLabel")
+    sucMsg.BackgroundTransparency = 1
+    sucMsg.Size = UDim2.new(1,-20,0,24)
+    sucMsg.Position = UDim2.new(0,10,0,150)
+    sucMsg.Font = Enum.Font.Gotham
+    sucMsg.TextSize = 16
+    sucMsg.TextColor3 = Color3.fromRGB(200,200,200)
+    sucMsg.Parent = sucF
+
+    local okBtn = Instance.new("TextButton")
+    okBtn.Size = UDim2.new(1,-48,0,48)
+    okBtn.Position = UDim2.new(0,24,1,-70)
+    okBtn.BackgroundColor3 = Color3.fromRGB(63,105,255)
+    okBtn.Font = Enum.Font.GothamBold
+    okBtn.TextSize = 20
+    okBtn.TextColor3 = Color3.new(1,1,1)
+    okBtn.Text = "OK"
+    okBtn.Parent = sucF
+    Instance.new("UICorner", okBtn).CornerRadius = UDim.new(0,8)
+
+    local busy = false
+    local preLoaded = false
+
+    local function showM()
+        modal.Visible = true
+        TweenService:Create(modal, TweenInfo.new(0.25), {BackgroundTransparency = 0.5}):Play()
+    end
+
+    local function hideM()
+        TweenService:Create(modal, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
+        task.delay(0.22, function() modal.Visible = false end)
+    end
+
+    local function openBuy(data)
+        nameL.Text = data.name or "Donation"
+        bAmt.Text = formatNumber(data.price or 0)
+        balAmt.Text = formatNumber(math.max(0, CONFIG.balance - (data.price or 0)))
+        if data.imageId then
+            img.Image = "rbxassetid://"..tostring(data.imageId)
+        elseif data.assetId then
+            img.Image = "rbxthumb://type=GamePass&id="..tostring(data.assetId).."&w=180&h=180"
+        else
+            img.Image = "http://www.roblox.com/asset/?id=13600173502"
+        end
+        loadBar.Size = UDim2.new(0,0,1,0)
+        loadBar.BackgroundTransparency = 0
+        buyBtn.BackgroundColor3 = LOAD_DARK
+        busy = false
+        preLoaded = false
+        buyF.Visible = true
+        buyF.Position = UDim2.new(0.5,-225,-0.3,0)
+        showM()
+        TweenService:Create(buyF, TweenInfo.new(0.35, Enum.EasingStyle.Back), {Position = UDim2.new(0.5,-225,0.5,-136)}):Play()
+        isMenuOpen = true
+        task.spawn(function()
+            local duration = 1.5
+            local start = tick()
+            while not preLoaded and (tick() - start) < duration do
+                loadBar.Size = UDim2.new((tick() - start) / duration, 0, 1, 0)
+                task.wait()
+            end
+            loadBar.Size = UDim2.new(1,0,1,0)
+            preLoaded = true
+            TweenService:Create(buyBtn, TweenInfo.new(0.3), {BackgroundColor3 = LOAD_FINAL}):Play()
+            TweenService:Create(loadBar, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+        end)
+    end
+
+    local function closeBuy()
+        busy = false; preLoaded = true
+        TweenService:Create(buyF, TweenInfo.new(0.25), {Position = UDim2.new(0.5,-225,-0.3,0)}):Play()
+        task.delay(0.25, function() buyF.Visible = false; hideM(); isMenuOpen = false; loadBar.BackgroundTransparency = 0 end)
+    end
+
+    local function openSuc()
+        sucMsg.Text = "You have successfully bought "..(currentPurchase.name or "Item")
+        sucF.Visible = true; sucF.Position = UDim2.new(0.5,-225,-0.3,0)
+        showM()
+        TweenService:Create(sucF, TweenInfo.new(0.3, Enum.EasingStyle.Back), {Position = UDim2.new(0.5,-225,0.5,-120)}):Play()
+        isMenuOpen = true
+    end
+
+    local function closeSuc()
+        TweenService:Create(sucF, TweenInfo.new(0.25), {Position = UDim2.new(0.5,-225,-0.3,0)}):Play()
+        task.delay(0.25, function() sucF.Visible = false; hideM(); isMenuOpen = false end)
+    end
+
+    xBtn.MouseButton1Click:Connect(function() playSound("Click",0.7); closeBuy() end)
+    buyBtn.MouseEnter:Connect(function() if preLoaded and not busy then TweenService:Create(buyBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(45,80,220)}):Play() end end)
+    buyBtn.MouseLeave:Connect(function() if preLoaded and not busy then TweenService:Create(buyBtn, TweenInfo.new(0.15), {BackgroundColor3 = LOAD_FINAL}):Play() end end)
+
+    buyBtn.MouseButton1Click:Connect(function()
+        if not preLoaded or busy then return end
+        busy = true; playSound("Click",0.7)
+        CONFIG.balance = math.max(0, CONFIG.balance - (currentPurchase.price or 0))
+        refreshBalDisplay()
+        updateStandRaised(currentPurchase.username, currentPurchase.price or 0)
+        updateDonatedLeaderboard(currentPurchase.price or 0)
+        closeBuy()
+        task.delay(0.3, function() playSound("Purchase",1); openSuc(); busy = false end)
+    end)
+
+    okBtn.MouseButton1Click:Connect(function() playSound("Click",0.7); closeSuc(); fireNotifications(currentPurchase.username or "Player", currentPurchase.price or 0) end)
+    trap.MouseButton1Click:Connect(function() if sucF.Visible then closeSuc() elseif buyF.Visible then closeBuy() end end)
+
+    prompts.RobloxClone = {
+        open = openBuy,
+        hideAll = function() buyF.Visible = false; sucF.Visible = false; modal.Visible = false; busy = false; preLoaded = true; isMenuOpen = false; loadBar.BackgroundTransparency = 0 end
+    }
+end
+
+-- ===================== 2. ROBLOX NEW BY FAZOX ===============================
+do
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "RNBF_Prompt"
+    gui.DisplayOrder = 10006
+    gui.IgnoreGuiInset = true
+    gui.ResetOnSpawn = false
+    gui.Parent = playerGui
+
+    local modal = Instance.new("Frame")
+    modal.BackgroundColor3 = Color3.new(0,0,0)
+    modal.BackgroundTransparency = 1
+    modal.Size = UDim2.new(1,0,1,0)
+    modal.Visible = false
+    modal.Parent = gui
+
+    local trap = Instance.new("TextButton")
+    trap.BackgroundTransparency = 1
+    trap.Size = UDim2.new(1,0,1,0)
+    trap.Text = ""
+    trap.Parent = modal
+
+    local buyF = Instance.new("Frame")
+    buyF.Size = UDim2.new(0,410,0,195)
+    buyF.AnchorPoint = Vector2.new(0.5,0.5)
+    buyF.Position = UDim2.new(0.5,0,0.5,0)
+    buyF.BackgroundColor3 = Color3.fromRGB(26,28,33)
+    buyF.BackgroundTransparency = 1
+    buyF.Visible = false
+    buyF.Parent = gui
+    Instance.new("UICorner", buyF).CornerRadius = UDim.new(0,10)
+
+    local bfStroke = Instance.new("UIStroke")
+    bfStroke.Color = Color3.fromRGB(60,60,70)
+    bfStroke.Thickness = 1.2
+    bfStroke.Transparency = 1
+    bfStroke.Parent = buyF
+
+    local title = Instance.new("TextLabel")
+    title.BackgroundTransparency = 1
+    title.Size = UDim2.new(0.4,0,0,28)
+    title.Position = UDim2.new(0,16,0,8)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 19
+    title.TextColor3 = Color3.new(1,1,1)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "Buy item"
+    title.Parent = buyF
+
+    local topBalIcon = Instance.new("ImageLabel")
+    topBalIcon.BackgroundTransparency = 1
+    topBalIcon.Size = UDim2.new(0,17,0,17)
+    topBalIcon.Position = UDim2.new(1,-135,0,13)
+    topBalIcon.Image = ROBUX_ICON
+    topBalIcon.Parent = buyF
+
+    local topBalText = Instance.new("TextLabel")
+    topBalText.Name = "TopBalText"
+    topBalText.BackgroundTransparency = 1
+    topBalText.Size = UDim2.new(0,95,0,22)
+    topBalText.Position = UDim2.new(1,-114,0,11)
+    topBalText.Font = Enum.Font.GothamBold
+    topBalText.TextSize = 14
+    topBalText.TextColor3 = Color3.new(1,1,1)
+    topBalText.TextXAlignment = Enum.TextXAlignment.Left
+    topBalText.Text = formatNumber(CONFIG.balance)
+    topBalText.Parent = buyF
+
+    local xBtn = Instance.new("TextButton")
+    xBtn.BackgroundTransparency = 1
+    xBtn.Size = UDim2.new(0,24,0,24)
+    xBtn.Position = UDim2.new(1,-30,0,8)
+    xBtn.Font = Enum.Font.GothamBold
+    xBtn.TextSize = 19
+    xBtn.TextColor3 = Color3.fromRGB(200,200,200)
+    xBtn.Text = "X"
+    xBtn.Parent = buyF
+
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(1,-24,0,1)
+    line.Position = UDim2.new(0,12,0,40)
+    line.BackgroundColor3 = Color3.fromRGB(60,60,70)
+    line.Parent = buyF
+
+    local img = Instance.new("ImageLabel")
+    img.BackgroundTransparency = 1
+    img.Size = UDim2.new(0,54,0,54)
+    img.Position = UDim2.new(0,20,0,52)
+    img.ScaleType = Enum.ScaleType.Fit
+    img.Parent = buyF
+    Instance.new("UICorner", img).CornerRadius = UDim.new(1,0)
+
+    local nameL = Instance.new("TextLabel")
+    nameL.BackgroundTransparency = 1
+    nameL.Size = UDim2.new(1,-110,0,26)
+    nameL.Position = UDim2.new(0,86,0,50)
+    nameL.Font = Enum.Font.GothamBold
+    nameL.TextSize = 17
+    nameL.TextColor3 = Color3.new(1,1,1)
+    nameL.TextXAlignment = Enum.TextXAlignment.Left
+    nameL.TextWrapped = true
+    nameL.TextTruncate = Enum.TextTruncate.AtEnd
+    nameL.Parent = buyF
+
+    local priceIcon = Instance.new("ImageLabel")
+    priceIcon.BackgroundTransparency = 1
+    priceIcon.Size = UDim2.new(0,17,0,17)
+    priceIcon.Position = UDim2.new(0,86,0,78)
+    priceIcon.Image = ROBUX_ICON
+    priceIcon.Parent = buyF
+
+    local priceL = Instance.new("TextLabel")
+    priceL.BackgroundTransparency = 1
+    priceL.Size = UDim2.new(0,150,0,19)
+    priceL.Position = UDim2.new(0,108,0,77)
+    priceL.Font = Enum.Font.GothamBold
+    priceL.TextSize = 17
+    priceL.TextColor3 = Color3.new(1,1,1)
+    priceL.TextXAlignment = Enum.TextXAlignment.Left
+    priceL.Parent = buyF
+
+    local buyBtn = Instance.new("TextButton")
+    buyBtn.Size = UDim2.new(1,-40,0,42)
+    buyBtn.Position = UDim2.new(0,20,1,-54)
+    buyBtn.BackgroundColor3 = LOAD_DARK
+    buyBtn.AutoButtonColor = false
+    buyBtn.Text = ""
+    buyBtn.ClipsDescendants = true
+    buyBtn.Parent = buyF
+    Instance.new("UICorner", buyBtn).CornerRadius = UDim.new(0,8)
+
+    local loadBar = Instance.new("Frame")
+    loadBar.BackgroundColor3 = Color3.fromRGB(45,68,152)
+    loadBar.Size = UDim2.new(0,0,1,0)
+    loadBar.ZIndex = 1
+    loadBar.Parent = buyBtn
+    Instance.new("UICorner", loadBar).CornerRadius = UDim.new(0,8)
+
+    local buyTxt = Instance.new("TextLabel")
+    buyTxt.BackgroundTransparency = 1
+    buyTxt.Size = UDim2.new(1,0,1,0)
+    buyTxt.Font = Enum.Font.GothamBold
+    buyTxt.TextSize = 19
+    buyTxt.TextColor3 = Color3.new(1,1,1)
+    buyTxt.Text = "Buy"
+    buyTxt.ZIndex = 2
+    buyTxt.Parent = buyBtn
+
+    local sucF = Instance.new("Frame")
+    sucF.Size = UDim2.new(0,410,0,220)
+    sucF.AnchorPoint = Vector2.new(0.5,0.5)
+    sucF.Position = UDim2.new(0.5,0,0.5,0)
+    sucF.BackgroundColor3 = Color3.fromRGB(26,28,33)
+    sucF.BackgroundTransparency = 1
+    sucF.Visible = false
+    sucF.Parent = gui
+    Instance.new("UICorner", sucF).CornerRadius = UDim.new(0,10)
+
+    local sfStroke = Instance.new("UIStroke")
+    sfStroke.Color = Color3.fromRGB(60,60,70)
+    sfStroke.Thickness = 1.2
+    sfStroke.Transparency = 1
+    sfStroke.Parent = sucF
+
+    local sucTitle = Instance.new("TextLabel")
+    sucTitle.BackgroundTransparency = 1
+    sucTitle.Size = UDim2.new(1,-20,0,30)
+    sucTitle.Position = UDim2.new(0,10,0,8)
+    sucTitle.Font = Enum.Font.GothamBold
+    sucTitle.TextSize = 19
+    sucTitle.TextColor3 = Color3.new(1,1,1)
+    sucTitle.Text = "Purchase completed"
+    sucTitle.TextXAlignment = Enum.TextXAlignment.Left
+    sucTitle.Parent = sucF
+
+    local sucLn = Instance.new("Frame")
+    sucLn.Size = UDim2.new(1,-24,0,1)
+    sucLn.Position = UDim2.new(0,12,0,40)
+    sucLn.BackgroundColor3 = Color3.fromRGB(60,60,70)
+    sucLn.Parent = sucF
+
+    local sucIco = Instance.new("ImageLabel")
+    sucIco.BackgroundTransparency = 1
+    sucIco.Size = UDim2.new(0,64,0,64)
+    sucIco.Position = UDim2.new(0.5,-32,0,52)
+    sucIco.Image = "rbxassetid://11419719540"
+    sucIco.Parent = sucF
+
+    local sucMsg = Instance.new("TextLabel")
+    sucMsg.BackgroundTransparency = 1
+    sucMsg.Size = UDim2.new(1,-20,0,24)
+    sucMsg.Position = UDim2.new(0,10,0,122)
+    sucMsg.Font = Enum.Font.Gotham
+    sucMsg.TextSize = 15
+    sucMsg.TextColor3 = Color3.fromRGB(200,200,200)
+    sucMsg.TextWrapped = true
+    sucMsg.Parent = sucF
+
+    local okBtn = Instance.new("TextButton")
+    okBtn.Size = UDim2.new(1,-40,0,42)
+    okBtn.Position = UDim2.new(0,20,1,-56)
+    okBtn.BackgroundColor3 = Color3.fromRGB(63,105,255)
+    okBtn.Font = Enum.Font.GothamBold
+    okBtn.TextSize = 19
+    okBtn.TextColor3 = Color3.new(1,1,1)
+    okBtn.Text = "OK"
+    okBtn.Parent = sucF
+    Instance.new("UICorner", okBtn).CornerRadius = UDim.new(0,8)
+
+    local busy = false
+    local preLoaded = false
+
+    local function showM() modal.Visible = true; TweenService:Create(modal, TweenInfo.new(0.25), {BackgroundTransparency = 0.5}):Play() end
+    local function hideM() TweenService:Create(modal, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play(); task.delay(0.22, function() modal.Visible = false end) end
+
+    local function openBuy(data)
+        nameL.Text = data.name or "Donation"
+        priceL.Text = formatNumber(data.price or 0)
+        topBalText.Text = formatNumber(CONFIG.balance)
+        if data.imageId then img.Image = "rbxassetid://"..tostring(data.imageId)
+        elseif data.assetId then img.Image = "rbxthumb://type=GamePass&id="..tostring(data.assetId).."&w=150&h=150"
+        else img.Image = "http://www.roblox.com/asset/?id=13600173502" end
+        loadBar.Size = UDim2.new(0,0,1,0); loadBar.BackgroundTransparency = 0; buyBtn.BackgroundColor3 = LOAD_DARK; busy = false; preLoaded = false
+        buyF.Visible = true; buyF.BackgroundTransparency = 1; bfStroke.Transparency = 1; buyF.Position = UDim2.new(0.5,0,0.5,15)
+        showM()
+        TweenService:Create(buyF, TweenInfo.new(0.25, Enum.EasingStyle.Back), {BackgroundTransparency = 0, Position = UDim2.new(0.5,0,0.5,0)}):Play()
+        TweenService:Create(bfStroke, TweenInfo.new(0.25), {Transparency = 0}):Play()
+        isMenuOpen = true
+        task.spawn(function()
+            local duration = 1.5; local start = tick()
+            while not preLoaded and (tick() - start) < duration do loadBar.Size = UDim2.new((tick() - start) / duration, 0, 1, 0); task.wait() end
+            loadBar.Size = UDim2.new(1,0,1,0); preLoaded = true
+            TweenService:Create(buyBtn, TweenInfo.new(0.25), {BackgroundColor3 = LOAD_FINAL}):Play()
+            TweenService:Create(loadBar, TweenInfo.new(0.25), {BackgroundTransparency = 1}):Play()
+        end)
+    end
+
+    local function closeBuy()
+        busy = false; preLoaded = true
+        TweenService:Create(buyF, TweenInfo.new(0.2), {BackgroundTransparency = 1, Position = UDim2.new(0.5,0,0.5,15)}):Play()
+        TweenService:Create(bfStroke, TweenInfo.new(0.2), {Transparency = 1}):Play()
+        task.delay(0.22, function() buyF.Visible = false; hideM(); isMenuOpen = false; loadBar.BackgroundTransparency = 0 end)
+    end
+
+    local function openSuc()
+        sucMsg.Text = "You have successfully bought "..(currentPurchase.name or "Item")
+        sucF.Visible = true; sucF.BackgroundTransparency = 1; sfStroke.Transparency = 1; sucF.Position = UDim2.new(0.5,0,0.5,15)
+        showM()
+        TweenService:Create(sucF, TweenInfo.new(0.25, Enum.EasingStyle.Back), {BackgroundTransparency = 0, Position = UDim2.new(0.5,0,0.5,0)}):Play()
+        TweenService:Create(sfStroke, TweenInfo.new(0.25), {Transparency = 0}):Play()
+        isMenuOpen = true
+    end
+
+    local function closeSuc()
+        TweenService:Create(sucF, TweenInfo.new(0.2), {BackgroundTransparency = 1, Position = UDim2.new(0.5,0,0.5,15)}):Play()
+        TweenService:Create(sfStroke, TweenInfo.new(0.2), {Transparency = 1}):Play()
+        task.delay(0.22, function() sucF.Visible = false; hideM(); isMenuOpen = false end)
+    end
+
+    xBtn.MouseButton1Click:Connect(function() playSound("Click",0.7); closeBuy() end)
+    buyBtn.MouseEnter:Connect(function() if preLoaded and not busy then TweenService:Create(buyBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(45,80,220)}):Play() end end)
+    buyBtn.MouseLeave:Connect(function() if preLoaded and not busy then TweenService:Create(buyBtn, TweenInfo.new(0.15), {BackgroundColor3 = LOAD_FINAL}):Play() end end)
+
+    buyBtn.MouseButton1Click:Connect(function()
+        if not preLoaded or busy then return end
+        busy = true; playSound("Click",0.7)
+        CONFIG.balance = math.max(0, CONFIG.balance - (currentPurchase.price or 0))
+        refreshBalDisplay()
+        updateStandRaised(currentPurchase.username, currentPurchase.price or 0)
+        updateDonatedLeaderboard(currentPurchase.price or 0)
+        closeBuy()
+        task.delay(0.3, function() playSound("Purchase",1); openSuc(); busy = false end)
+    end)
+
+    okBtn.MouseButton1Click:Connect(function() playSound("Click",0.7); closeSuc(); fireNotifications(currentPurchase.username or "Player", currentPurchase.price or 0) end)
+    trap.MouseButton1Click:Connect(function() if sucF.Visible then closeSuc() elseif buyF.Visible then closeBuy() end end)
+
+    prompts.RobloxNewByCodex = {
+        open = openBuy,
+        hideAll = function() buyF.Visible = false; sucF.Visible = false; modal.Visible = false; busy = false; preLoaded = true; isMenuOpen = false; loadBar.BackgroundTransparency = 0; bfStroke.Transparency = 1; sfStroke.Transparency = 1 end
+    }
+end
+
+-- ===================== 3. FAZOX CLASSIC =====================================
+do
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "FC_Prompt"
+    gui.DisplayOrder = 10004
+    gui.IgnoreGuiInset = true
+    gui.ResetOnSpawn = false
+    gui.Parent = playerGui
+
+    local modal = Instance.new("Frame")
+    modal.BackgroundColor3 = Color3.new(0,0,0); modal.BackgroundTransparency = 1; modal.Size = UDim2.new(1,0,1,0); modal.Visible = false; modal.Parent = gui
+    local trap = Instance.new("TextButton"); trap.BackgroundTransparency = 1; trap.Size = UDim2.new(1,0,1,0); trap.Text = ""; trap.Parent = modal
+
+    local buyF = Instance.new("Frame")
+    buyF.Size = UDim2.new(0,450,0,225); buyF.Position = UDim2.new(0.5,0,0.6,0); buyF.AnchorPoint = Vector2.new(0.5,0.5)
+    buyF.BackgroundColor3 = Color3.fromRGB(30,30,35); buyF.BackgroundTransparency = 1; buyF.Visible = false; buyF.Parent = gui
+    Instance.new("UICorner", buyF).CornerRadius = UDim.new(0,12)
+    local buyStroke = Instance.new("UIStroke", buyF); buyStroke.Color = Color3.fromRGB(60,60,70); buyStroke.Thickness = 1.5; buyStroke.Transparency = 1
+
+    local buyTit = Instance.new("TextLabel"); buyTit.Size = UDim2.new(1,0,0,50); buyTit.BackgroundTransparency = 1; buyTit.Text = "Buy item"; buyTit.TextColor3 = Color3.new(1,1,1); buyTit.Font = Enum.Font.GothamBlack; buyTit.TextSize = 22; buyTit.Parent = buyF
+    local buyLn = Instance.new("Frame"); buyLn.Size = UDim2.new(1,-30,0,1); buyLn.Position = UDim2.new(0,15,0,50); buyLn.BackgroundColor3 = Color3.fromRGB(60,60,70); buyLn.Parent = buyF
+    local buyImg = Instance.new("ImageLabel"); buyImg.Size = UDim2.new(0,80,0,80); buyImg.Position = UDim2.new(0,20,0,55); buyImg.BackgroundColor3 = Color3.fromRGB(45,45,55); buyImg.BorderSizePixel = 0; buyImg.Parent = buyF; Instance.new("UICorner", buyImg).CornerRadius = UDim.new(0,8)
+    local buyName = Instance.new("TextLabel"); buyName.Size = UDim2.new(0,300,0,30); buyName.Position = UDim2.new(0,115,0,65); buyName.BackgroundTransparency = 1; buyName.TextColor3 = Color3.new(1,1,1); buyName.Font = Enum.Font.GothamBold; buyName.TextSize = 20; buyName.TextXAlignment = Enum.TextXAlignment.Left; buyName.Parent = buyF
+    local rIcon = Instance.new("ImageLabel"); rIcon.Size = UDim2.new(0,22,0,22); rIcon.Position = UDim2.new(0,115,0,100); rIcon.BackgroundTransparency = 1; rIcon.Image = ROBUX_ICON; rIcon.Parent = buyF
+    local buyPrc = Instance.new("TextLabel"); buyPrc.Size = UDim2.new(0,250,0,25); buyPrc.Position = UDim2.new(0,140,0,98); buyPrc.BackgroundTransparency = 1; buyPrc.TextColor3 = Color3.new(1,1,1); buyPrc.Font = Enum.Font.Gotham; buyPrc.TextSize = 18; buyPrc.TextXAlignment = Enum.TextXAlignment.Left; buyPrc.Parent = buyF
+
+    local buyBtn = Instance.new("TextButton"); buyBtn.Size = UDim2.new(1,-30,0,50); buyBtn.Position = UDim2.new(0,15,1,-80); buyBtn.BackgroundColor3 = LOAD_DARK; buyBtn.Text = ""; buyBtn.AutoButtonColor = false; buyBtn.ClipsDescendants = true; buyBtn.Parent = buyF; Instance.new("UICorner", buyBtn).CornerRadius = UDim.new(0,8)
+    local loadBar = Instance.new("Frame"); loadBar.Size = UDim2.new(0,0,1,0); loadBar.BackgroundColor3 = Color3.fromRGB(0,60,180); loadBar.ZIndex = 1; loadBar.Parent = buyBtn; Instance.new("UICorner", loadBar).CornerRadius = UDim.new(0,8)
+    local buyBtnTxt = Instance.new("TextLabel"); buyBtnTxt.Size = UDim2.new(1,0,1,0); buyBtnTxt.BackgroundTransparency = 1; buyBtnTxt.Text = "Buy"; buyBtnTxt.TextColor3 = Color3.new(1,1,1); buyBtnTxt.Font = Enum.Font.GothamBold; buyBtnTxt.TextSize = 20; buyBtnTxt.ZIndex = 2; buyBtnTxt.Parent = buyBtn
+
+    local balCont = Instance.new("Frame"); balCont.Size = UDim2.new(1,0,0,22); balCont.Position = UDim2.new(0,0,1,-25); balCont.BackgroundTransparency = 1; balCont.Parent = buyF
+    local balLbl = Instance.new("TextLabel"); balLbl.Size = UDim2.new(0,200,0,18); balLbl.Position = UDim2.new(0,18,0,2); balLbl.BackgroundTransparency = 1; balLbl.Text = "Your balance after purchase:"; balLbl.TextColor3 = Color3.fromRGB(140,140,150); balLbl.Font = Enum.Font.Gotham; balLbl.TextSize = 11; balLbl.TextXAlignment = Enum.TextXAlignment.Left; balLbl.Parent = balCont
+    local balIc = Instance.new("ImageLabel"); balIc.Size = UDim2.new(0,14,0,14); balIc.Position = UDim2.new(0,218,0,4); balIc.BackgroundTransparency = 1; balIc.Image = ROBUX_ICON; balIc.Parent = balCont
+    local balAmt = Instance.new("TextLabel"); balAmt.Size = UDim2.new(0,200,0,18); balAmt.Position = UDim2.new(0,234,0,2); balAmt.BackgroundTransparency = 1; balAmt.TextColor3 = Color3.new(1,1,1); balAmt.Font = Enum.Font.GothamBold; balAmt.TextSize = 11; balAmt.TextXAlignment = Enum.TextXAlignment.Left; balAmt.Parent = balCont
+
+    local sucF = Instance.new("Frame"); sucF.Size = UDim2.new(0,450,0,225); sucF.Position = UDim2.new(0.5,0,0.6,0); sucF.AnchorPoint = Vector2.new(0.5,0.5); sucF.BackgroundColor3 = Color3.fromRGB(30,30,35); sucF.BackgroundTransparency = 1; sucF.Visible = false; sucF.Parent = gui; Instance.new("UICorner", sucF).CornerRadius = UDim.new(0,12)
+    local sucStroke = Instance.new("UIStroke", sucF); sucStroke.Color = Color3.fromRGB(60,60,70); sucStroke.Thickness = 1.5; sucStroke.Transparency = 1
+    local sucTit = Instance.new("TextLabel"); sucTit.Size = UDim2.new(1,0,0,50); sucTit.BackgroundTransparency = 1; sucTit.Text = "Purchased completed"; sucTit.TextColor3 = Color3.new(1,1,1); sucTit.Font = Enum.Font.GothamBlack; sucTit.TextSize = 22; sucTit.Parent = sucF
+    local sucLn2 = buyLn:Clone(); sucLn2.Parent = sucF
+    local sucIco = Instance.new("ImageLabel"); sucIco.Size = UDim2.new(0,70,0,70); sucIco.Position = UDim2.new(0.5,-35,0,60); sucIco.BackgroundTransparency = 1; sucIco.Image = "rbxthumb://type=Asset&id=17829956139&w=150&h=150"; sucIco.Parent = sucF
+    local sucMsg = Instance.new("TextLabel"); sucMsg.Size = UDim2.new(1,-30,0,25); sucMsg.Position = UDim2.new(0,15,0,135); sucMsg.BackgroundTransparency = 1; sucMsg.TextColor3 = Color3.new(1,1,1); sucMsg.Font = Enum.Font.Gotham; sucMsg.TextSize = 14; sucMsg.Parent = sucF
+    local okBtn = Instance.new("TextButton"); okBtn.Size = UDim2.new(1,-30,0,45); okBtn.Position = UDim2.new(0,15,1,-60); okBtn.BackgroundColor3 = Color3.fromRGB(0,170,255); okBtn.Text = "Okay"; okBtn.TextColor3 = Color3.new(1,1,1); okBtn.Font = Enum.Font.GothamBold; okBtn.TextSize = 20; okBtn.Parent = sucF; Instance.new("UICorner", okBtn).CornerRadius = UDim.new(0,8)
+
+    local busy = false; local preLoaded = false
+    local function showM() modal.Visible = true; TweenService:Create(modal, TweenInfo.new(0.3), {BackgroundTransparency = 0.5}):Play() end
+    local function hideM() TweenService:Create(modal, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play(); task.delay(0.22, function() modal.Visible = false end) end
+
+    local function openBuy(data)
+        buyName.Text = data.name or "Item"; buyPrc.Text = formatNumber(data.price or 0); balAmt.Text = formatNumber(math.max(0, CONFIG.balance - (data.price or 0)))
+        if data.imageId then buyImg.Image = "rbxassetid://"..tostring(data.imageId) elseif data.assetId then buyImg.Image = "rbxthumb://type=GamePass&id="..tostring(data.assetId).."&w=150&h=150" else buyImg.Image = "" end
+        loadBar.Size = UDim2.new(0,0,1,0); loadBar.BackgroundTransparency = 0; buyBtn.BackgroundColor3 = LOAD_DARK; busy = false; preLoaded = false
+        buyF.Visible = true; buyF.BackgroundTransparency = 1; buyStroke.Transparency = 1; buyF.Position = UDim2.new(0.5,0,0.6,0); showM()
+        TweenService:Create(buyF, TweenInfo.new(0.3, Enum.EasingStyle.Back), {BackgroundTransparency = 0, Position = UDim2.new(0.5,0,0.55,0)}):Play()
+        TweenService:Create(buyStroke, TweenInfo.new(0.3), {Transparency = 0}):Play(); isMenuOpen = true
+        task.spawn(function()
+            local duration = 1.5; local start = tick()
+            while not preLoaded and (tick() - start) < duration do loadBar.Size = UDim2.new((tick() - start) / duration, 0, 1, 0); task.wait() end
+            loadBar.Size = UDim2.new(1,0,1,0); preLoaded = true
+            TweenService:Create(buyBtn, TweenInfo.new(0.3), {BackgroundColor3 = Color3.fromRGB(0,120,255)}):Play()
+            TweenService:Create(loadBar, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+        end)
+    end
+
+    local function closeBuy() busy = false; preLoaded = true; TweenService:Create(buyF, TweenInfo.new(0.2), {BackgroundTransparency = 1, Position = UDim2.new(0.5,0,0.6,0)}):Play(); task.delay(0.22, function() buyF.Visible = false; hideM(); isMenuOpen = false; loadBar.BackgroundTransparency = 0 end) end
+    local function openSuc() sucMsg.Text = "You have successfully bought "..(currentPurchase.name or "Item"); sucF.Visible = true; sucF.BackgroundTransparency = 1; sucStroke.Transparency = 1; sucF.Position = UDim2.new(0.5,0,0.6,0); showM(); TweenService:Create(sucF, TweenInfo.new(0.3, Enum.EasingStyle.Back), {BackgroundTransparency = 0, Position = UDim2.new(0.5,0,0.55,0)}):Play(); TweenService:Create(sucStroke, TweenInfo.new(0.3), {Transparency = 0}):Play(); isMenuOpen = true end
+    local function closeSuc() TweenService:Create(sucF, TweenInfo.new(0.2), {BackgroundTransparency = 1, Position = UDim2.new(0.5,0,0.6,0)}):Play(); task.delay(0.22, function() sucF.Visible = false; hideM(); isMenuOpen = false end) end
+
+    buyBtn.MouseEnter:Connect(function() if preLoaded and not busy then TweenService:Create(buyBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(0,100,220)}):Play() end end)
+    buyBtn.MouseLeave:Connect(function() if preLoaded and not busy then TweenService:Create(buyBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(0,120,255)}):Play() end end)
+    buyBtn.MouseButton1Click:Connect(function()
+        if not preLoaded or busy then return end; busy = true; playSound("Click",0.7)
+        CONFIG.balance = math.max(0, CONFIG.balance - (currentPurchase.price or 0)); refreshBalDisplay()
+        updateStandRaised(currentPurchase.username, currentPurchase.price or 0); updateDonatedLeaderboard(currentPurchase.price or 0)
+        TweenService:Create(buyF, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play()
+        task.delay(0.15, function() buyF.Visible = false; playSound("Purchase",1); openSuc(); busy = false end)
+    end)
+    okBtn.MouseButton1Click:Connect(function() playSound("Click",0.7); closeSuc(); fireNotifications(currentPurchase.username or "Player", currentPurchase.price or 0) end)
+    trap.MouseButton1Click:Connect(function() if sucF.Visible then closeSuc() elseif buyF.Visible then closeBuy() end end)
+
+    prompts.CodexClassic = {
+        open = openBuy,
+        hideAll = function() buyF.Visible = false; sucF.Visible = false; modal.Visible = false; busy = false; preLoaded = true; isMenuOpen = false; loadBar.BackgroundTransparency = 0 end
+    }
+end
+
+-- ===================== 4. ROBLOX ORIGINAL ===================================
+do
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "RO_Prompt"
+    gui.DisplayOrder = 10007
+    gui.IgnoreGuiInset = true
+    gui.ResetOnSpawn = false
+    gui.Parent = playerGui
+
+    local modal = Instance.new("Frame")
+    modal.BackgroundColor3 = Color3.new(0,0,0)
+    modal.BackgroundTransparency = 1
+    modal.Size = UDim2.new(1,0,1,0)
+    modal.Visible = false
+    modal.Parent = gui
+
+    local trap = Instance.new("TextButton")
+    trap.BackgroundTransparency = 1
+    trap.Size = UDim2.new(1,0,1,0)
+    trap.Text = ""
+    trap.Parent = modal
+
+    local buyF = Instance.new("Frame")
+    buyF.Size = UDim2.fromOffset(420, 208)
+    buyF.AnchorPoint = Vector2.new(0.5, 0.5)
+    buyF.Position = UDim2.fromScale(0.5, 0.5)
+    buyF.BackgroundColor3 = Color3.fromRGB(31, 32, 36)
+    buyF.BorderSizePixel = 0
+    buyF.Visible = false
+    buyF.Parent = gui
+    Instance.new("UICorner", buyF).CornerRadius = UDim.new(0, 14)
+
+    local bfStroke = Instance.new("UIStroke")
+    bfStroke.Color = Color3.new(1,1,1)
+    bfStroke.Transparency = 0.85
+    bfStroke.Parent = buyF
+
+    local title = Instance.new("TextLabel")
+    title.Position = UDim2.fromOffset(20, 16)
+    title.Size = UDim2.new(1, -40, 0, 28)
+    title.Text = "Buy Item"
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 19
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.BackgroundTransparency = 1
+    title.TextColor3 = Color3.fromRGB(240, 240, 240)
+    title.Parent = buyF
+
+    local balHolder = Instance.new("Frame")
+    balHolder.Position = UDim2.new(1, -55, 0, 16)
+    balHolder.AnchorPoint = Vector2.new(1, 0)
+    balHolder.Size = UDim2.fromOffset(0, 28)
+    balHolder.AutomaticSize = Enum.AutomaticSize.X
+    balHolder.BackgroundTransparency = 1
+    balHolder.Parent = buyF
+
+    local balIcon = Instance.new("ImageLabel")
+    balIcon.Size = UDim2.fromOffset(20, 20)
+    balIcon.Position = UDim2.fromOffset(0, 4)
+    balIcon.Image = ROBUX_ICON
+    balIcon.BackgroundTransparency = 1
+    balIcon.Parent = balHolder
+
+    local topBalText = Instance.new("TextLabel")
+    topBalText.Name = "TopBalText"
+    topBalText.Position = UDim2.fromOffset(22, 0)
+    topBalText.Size = UDim2.new(0, 0, 1, 0)
+    topBalText.AutomaticSize = Enum.AutomaticSize.X
+    topBalText.Text = formatNumber(CONFIG.balance)
+    topBalText.Font = Enum.Font.GothamBold
+    topBalText.TextSize = 14
+    topBalText.TextXAlignment = Enum.TextXAlignment.Left
+    topBalText.BackgroundTransparency = 1
+    topBalText.TextColor3 = Color3.fromRGB(230, 230, 230)
+    topBalText.Parent = balHolder
+
+    local xBtn = Instance.new("TextButton")
+    xBtn.Position = UDim2.new(1, -15, 0, 15)
+    xBtn.AnchorPoint = Vector2.new(1, 0)
+    xBtn.Size = UDim2.fromOffset(30, 30)
+    xBtn.Text = "X"
+    xBtn.Font = Enum.Font.GothamBold
+    xBtn.TextSize = 18
+    xBtn.BackgroundTransparency = 1
+    xBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    xBtn.Parent = buyF
+
+    local row = Instance.new("Frame")
+    row.Position = UDim2.fromOffset(20, 56)
+    row.Size = UDim2.new(1, -40, 0, 64)
+    row.BackgroundTransparency = 1
+    row.Parent = buyF
+
+    local img = Instance.new("ImageLabel")
+    img.Size = UDim2.fromOffset(68, 68)
+    img.Position = UDim2.fromOffset(0, -2)
+    img.BackgroundTransparency = 1
+    img.Parent = row
+
+    local textCol = Instance.new("Frame")
+    textCol.Position = UDim2.fromOffset(78, 0)
+    textCol.Size = UDim2.new(1, -78, 1, 0)
+    textCol.BackgroundTransparency = 1
+    textCol.Parent = row
+
+    local nameL = Instance.new("TextLabel")
+    nameL.Position = UDim2.fromOffset(0, 8)
+    nameL.Size = UDim2.new(1, 0, 0, 24)
+    nameL.Font = Enum.Font.GothamBold
+    nameL.TextSize = 17
+    nameL.TextXAlignment = Enum.TextXAlignment.Left
+    nameL.BackgroundTransparency = 1
+    nameL.TextColor3 = Color3.fromRGB(240, 240, 240)
+    nameL.Parent = textCol
+
+    local priceRow = Instance.new("Frame")
+    priceRow.Position = UDim2.fromOffset(0, 38)
+    priceRow.Size = UDim2.fromOffset(120, 20)
+    priceRow.BackgroundTransparency = 1
+    priceRow.Parent = textCol
+
+    local priceIco = Instance.new("ImageLabel")
+    priceIco.Size = UDim2.fromOffset(18, 18)
+    priceIco.Position = UDim2.fromOffset(0, 1)
+    priceIco.Image = ROBUX_ICON
+    priceIco.BackgroundTransparency = 1
+    priceIco.Parent = priceRow
+
+    local priceL = Instance.new("TextLabel")
+    priceL.Position = UDim2.fromOffset(20, 0)
+    priceL.Size = UDim2.new(1, -20, 1, 0)
+    priceL.Font = Enum.Font.GothamBold
+    priceL.TextSize = 15
+    priceL.TextXAlignment = Enum.TextXAlignment.Left
+    priceL.BackgroundTransparency = 1
+    priceL.TextColor3 = Color3.fromRGB(240, 240, 240)
+    priceL.Parent = priceRow
+
+    local buyBtn = Instance.new("TextButton")
+    buyBtn.Position = UDim2.fromOffset(20, 155)
+    buyBtn.Size = UDim2.new(1, -40, 0, 36)
+    buyBtn.BackgroundColor3 = Color3.fromRGB(0, 60, 140)
+    buyBtn.AutoButtonColor = false
+    buyBtn.Text = ""
+    buyBtn.ClipsDescendants = true
+    buyBtn.Parent = buyF
+    Instance.new("UICorner", buyBtn).CornerRadius = UDim.new(0, 8)
+
+    local filler = Instance.new("Frame")
+    filler.Size = UDim2.new(0, 0, 1, 0)
+    filler.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+    filler.BorderSizePixel = 0
+    filler.ZIndex = 2
+    filler.Parent = buyBtn
+    Instance.new("UICorner", filler).CornerRadius = UDim.new(0, 8)
+
+    local btnLabel = Instance.new("TextLabel")
+    btnLabel.Size = UDim2.new(1, 0, 1, 0)
+    btnLabel.BackgroundTransparency = 1
+    btnLabel.Text = "Buy"
+    btnLabel.Font = Enum.Font.GothamBold
+    btnLabel.TextSize = 15
+    btnLabel.TextColor3 = Color3.new(1, 1, 1)
+    btnLabel.ZIndex = 3
+    btnLabel.Parent = buyBtn
+
+    local sucF = Instance.new("Frame")
+    sucF.Size = UDim2.fromOffset(420, 220)
+    sucF.Position = UDim2.fromScale(0.5, 0.5)
+    sucF.AnchorPoint = Vector2.new(0.5, 0.5)
+    sucF.BackgroundColor3 = Color3.fromRGB(31, 32, 36)
+    sucF.BorderSizePixel = 0
+    sucF.Visible = false
+    sucF.Parent = gui
+    Instance.new("UICorner", sucF).CornerRadius = UDim.new(0, 14)
+
+    local sfStroke = Instance.new("UIStroke")
+    sfStroke.Color = Color3.fromRGB(60, 60, 60)
+    sfStroke.Transparency = 0.5
+    sfStroke.Parent = sucF
+
+    local sucTitle = Instance.new("TextLabel")
+    sucTitle.Text = "Purchase completed"
+    sucTitle.Font = Enum.Font.GothamBold
+    sucTitle.TextSize = 18
+    sucTitle.TextXAlignment = Enum.TextXAlignment.Left
+    sucTitle.Position = UDim2.fromOffset(20, 16)
+    sucTitle.Size = UDim2.new(1, -40, 0, 24)
+    sucTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+    sucTitle.BackgroundTransparency = 1
+    sucTitle.Parent = sucF
+
+    local sucClose = Instance.new("TextButton")
+    sucClose.Position = UDim2.new(1, -36, 0, 16)
+    sucClose.Size = UDim2.fromOffset(28, 28)
+    sucClose.Text = "X"
+    sucClose.Font = Enum.Font.GothamBold
+    sucClose.TextSize = 19
+    sucClose.BackgroundTransparency = 1
+    sucClose.TextColor3 = Color3.fromRGB(200, 200, 200)
+    sucClose.Parent = sucF
+
+    local iconContainer = Instance.new("Frame")
+    iconContainer.Size = UDim2.fromOffset(48, 48)
+    iconContainer.Position = UDim2.fromScale(0.5, 0.45)
+    iconContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+    iconContainer.BackgroundTransparency = 1
+    iconContainer.Parent = sucF
+
+    local circle = Instance.new("Frame")
+    circle.Size = UDim2.fromScale(1, 1)
+    circle.BackgroundTransparency = 1
+    circle.Parent = iconContainer
+    Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
+    local cStroke = Instance.new("UIStroke"); cStroke.Thickness = 3; cStroke.Color = Color3.fromRGB(150, 150, 150); cStroke.Parent = circle
+
+    local checkmark = Instance.new("ImageLabel")
+    checkmark.Size = UDim2.fromScale(0.75, 0.75)
+    checkmark.Position = UDim2.fromScale(0.5, 0.5)
+    checkmark.AnchorPoint = Vector2.new(0.5, 0.5)
+    checkmark.BackgroundTransparency = 1
+    checkmark.Image = "rbxassetid://3944680095"
+    checkmark.ImageColor3 = Color3.fromRGB(180, 180, 180)
+    checkmark.Parent = iconContainer
+
+    local sucMsg = Instance.new("TextLabel")
+    sucMsg.Font = Enum.Font.GothamMedium
+    sucMsg.TextSize = 15
+    sucMsg.TextWrapped = true
+    sucMsg.Position = UDim2.fromOffset(40, 125)
+    sucMsg.Size = UDim2.new(1, -80, 0, 40)
+    sucMsg.TextColor3 = Color3.fromRGB(220, 220, 220)
+    sucMsg.BackgroundTransparency = 1
+    sucMsg.Parent = sucF
+
+    local okBtn = Instance.new("TextButton")
+    okBtn.Size = UDim2.new(1, -40, 0, 36)
+    okBtn.Position = UDim2.fromOffset(20, 170)
+    okBtn.Text = "OK"
+    okBtn.Font = Enum.Font.GothamBold
+    okBtn.TextSize = 15
+    okBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+    okBtn.TextColor3 = Color3.new(1, 1, 1)
+    okBtn.Parent = sucF
+    Instance.new("UICorner", okBtn).CornerRadius = UDim.new(0, 8)
+
+    local busy = false
+    local preLoaded = false
+
+    local function showM() modal.Visible = true; TweenService:Create(modal, TweenInfo.new(0.25), {BackgroundTransparency = 0.5}):Play() end
+    local function hideM() TweenService:Create(modal, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play(); task.delay(0.22, function() modal.Visible = false end) end
+
+    local function openBuy(data)
+        nameL.Text = data.name or "Donation"
+        priceL.Text = formatNumber(data.price or 0)
+        topBalText.Text = formatNumber(CONFIG.balance)
+
+        if data.imageId then
+            img.Image = "rbxassetid://"..tostring(data.imageId)
+        elseif data.assetId then
+            img.Image = "rbxthumb://type=GamePass&id="..tostring(data.assetId).."&w=150&h=150"
+        else
+            img.Image = "http://www.roblox.com/asset/?id=13600173502"
+        end
+
+        filler.Size = UDim2.new(0, 0, 1, 0)
+        buyBtn.BackgroundColor3 = Color3.fromRGB(0, 60, 140)
+        busy = false
+        preLoaded = false
+
+        buyF.Visible = true
+        buyF.Position = UDim2.fromScale(0.5, 0.4)
+        showM()
+        TweenService:Create(buyF, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Position = UDim2.fromScale(0.5, 0.5)}):Play()
+        isMenuOpen = true
+
+        task.spawn(function()
+            task.wait(0.5)
+            if not filler or not filler.Parent then return end
+            local tw = TweenService:Create(filler, TweenInfo.new(3.0, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 1, 0)})
+            tw:Play()
+            tw.Completed:Wait()
+            if not buyBtn or not buyBtn.Parent then return end
+            preLoaded = true
+        end)
+    end
+
+    local function closeBuy()
+        busy = false; preLoaded = true
+        TweenService:Create(buyF, TweenInfo.new(0.2), {Position = UDim2.fromScale(0.5, 0.4)}):Play()
+        task.delay(0.22, function() buyF.Visible = false; hideM(); isMenuOpen = false end)
+    end
+
+    local function openSuc()
+        sucMsg.Text = "You have successfully bought "..(currentPurchase.name or "Item").."."
+        sucF.Visible = true
+        sucF.Position = UDim2.fromScale(0.5, 0.5)
+        showM()
+        isMenuOpen = true
+    end
+
+    local function closeSuc()
+        sucF.Visible = false
+        hideM()
+        isMenuOpen = false
+    end
+
+    xBtn.MouseButton1Click:Connect(function() playSound("Click",0.7); closeBuy() end)
+
+    buyBtn.MouseButton1Click:Connect(function()
+        if not preLoaded or busy then return end
+        busy = true; playSound("Click",0.7)
+        CONFIG.balance = math.max(0, CONFIG.balance - (currentPurchase.price or 0))
+        refreshBalDisplay()
+        updateStandRaised(currentPurchase.username, currentPurchase.price or 0)
+        updateDonatedLeaderboard(currentPurchase.price or 0)
+        closeBuy()
+        task.delay(0.3, function() playSound("Purchase",1); openSuc(); busy = false end)
+    end)
+
+    okBtn.MouseButton1Click:Connect(function() playSound("Click",0.7); closeSuc(); fireNotifications(currentPurchase.username or "Player", currentPurchase.price or 0) end)
+    sucClose.MouseButton1Click:Connect(function() playSound("Click",0.7); closeSuc(); fireNotifications(currentPurchase.username or "Player", currentPurchase.price or 0) end)
+    trap.MouseButton1Click:Connect(function() if sucF.Visible then closeSuc() elseif buyF.Visible then closeBuy() end end)
+
+    prompts.RobloxOriginal = {
+        open = openBuy,
+        hideAll = function() buyF.Visible = false; sucF.Visible = false; modal.Visible = false; busy = false; preLoaded = true; isMenuOpen = false end
+    }
+end
+
+-- ============================================================================
+-- OPEN PROMPT
+-- ============================================================================
+local function openPrompt(data)
+    if isMenuOpen then return end
+    closeRealPrompts()
+    currentPurchase = data
+    for k, p in pairs(prompts) do
+        if k ~= CONFIG.uiChoice then p.hideAll() end
+    end
+    local chosen = prompts[CONFIG.uiChoice] or prompts.RobloxOriginal
+    chosen.open(data)
+end
+
+-- ============================================================================
+-- GET INFO
+-- ============================================================================
+local function getInfo(itemFrame, forcePrice, forceAsset)
+    local info = {name="Donation", price=forcePrice or 0, username="Player", assetId=forceAsset, imageId=nil}
+    if itemFrame then
+        pcall(function()
+            info.price = itemFrame:GetAttribute("AssetPrice") or info.price
+            info.assetId = itemFrame:GetAttribute("AssetId") or info.assetId
+            local n = itemFrame:GetAttribute("AssetName")
+            if n and n ~= "" then info.name = n end
+        end)
+        pcall(function()
+            local cid = itemFrame:GetAttribute("CreatorId")
+            if cid and cid > 0 then
+                local ok, name = pcall(function() return Players:GetNameFromUserIdAsync(cid) end)
+                if ok and name then info.username = name end
+            end
+        end)
+        if info.username == "Player" then
+            pcall(function()
+                local cur = itemFrame
+                for _ = 1, 15 do
+                    cur = cur.Parent
+                    if not cur then break end
+                    for _, d in pairs(cur:GetDescendants()) do
+                        if d:IsA("TextLabel") and d.Text and d.Visible then
+                            local m = d.Text:match("@([%w_]+)")
+                            if m and #m >= 3 then info.username = m; return end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+    if info.assetId then
+        pcall(function()
+            local prod = MarketplaceService:GetProductInfo(info.assetId, Enum.InfoType.GamePass)
+            if prod then
+                if prod.Name and prod.Name ~= "" then info.name = prod.Name end
+                if prod.PriceInRobux and prod.PriceInRobux > 0 then info.price = prod.PriceInRobux end
+                if prod.IconImageAssetId and prod.IconImageAssetId > 0 then info.imageId = prod.IconImageAssetId end
+                if prod.Creator and prod.Creator.Name then info.username = prod.Creator.Name end
+            end
+        end)
+    end
+    return info
+end
+
+-- ============================================================================
+-- ITEMFRAME
+-- ============================================================================
+local function setupItemFrame(f)
+    if not f or processedFrames[f] then return end
+    processedFrames[f] = true
+    f.MouseButton1Click:Connect(function()
+        if isMenuOpen then return end
+        closeRealPrompts()
+        local info = getInfo(f)
+        if info.price > 0 then openPrompt(info) end
+    end)
+end
+
+task.spawn(function()
+    task.wait(3)
+    for _, f in pairs(CollectionService:GetTagged("ItemFrame")) do
+        pcall(function() setupItemFrame(f) end)
+    end
+end)
+
+CollectionService:GetInstanceAddedSignal("ItemFrame"):Connect(function(f)
+    task.delay(0.3, function() pcall(function() setupItemFrame(f) end) end)
+end)
+
+-- ============================================================================
+-- HOOK
+-- ============================================================================
+task.spawn(function()
+    pcall(function()
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            local args = {...}
+            if self == MarketplaceService then
+                if method == "PromptGamePassPurchase" or method == "PromptPurchase" or method == "PromptProductPurchase" or method == "PromptRobloxPurchase" then
+                    local id = args[2] or args[1]
+                    if typeof(id) == "number" then
+                        closeRealPrompts()
+                        task.spawn(function() openPrompt(getInfo(nil, args[3] or 0, id)) end)
+                        return nil
+                    end
+                elseif method == "PerformPurchase" then
+                    return nil
+                end
+            end
+            if method == "FireServer" then
+                local ok, path = pcall(function() return self:GetFullName() end)
+                if ok and path and (path:find("Prompt") or path:find("Purchase") or path:find("Booth")) then
+                    local price, assetId = 0, nil
+                    for _, v in ipairs(args) do
+                        if typeof(v) == "number" then
+                            if v > price then price = v end
+                            if v > 1000 then assetId = v end
+                        end
+                    end
+                    if price > 0 or assetId then
+                        local info = getInfo(self.Parent, price, assetId)
+                        if info.price > 0 then openPrompt(info); return nil end
+                    end
+                end
+            end
+            return old(self, ...)
+        end))
+    end)
+end)
+
+task.spawn(function()
+    while true do task.wait(0.5); closeRealPrompts() end
+end)
+
+-- ============================================================================
+-- SETTINGS F4
+-- ============================================================================
+local setGui = Instance.new("ScreenGui")
+setGui.Name = "FD_Settings"
+setGui.IgnoreGuiInset = true
+setGui.ResetOnSpawn = false
+setGui.DisplayOrder = 11000
+setGui.Parent = playerGui
+
+local setF = Instance.new("Frame")
+setF.Size = UDim2.new(0,310,0,370)
+setF.Position = UDim2.new(0,20,0.5,-185)
+setF.BackgroundColor3 = Color3.fromRGB(39,41,48)
+setF.Visible = false
+setF.Active = true
+setF.Draggable = true
+setF.Parent = setGui
+Instance.new("UICorner", setF).CornerRadius = UDim.new(0,12)
+Instance.new("UIStroke", setF).Color = Color3.fromRGB(60,60,70)
+
+local setTitle = Instance.new("TextLabel")
+setTitle.BackgroundTransparency = 1
+setTitle.Size = UDim2.new(1,0,0,40)
+setTitle.Text = "Settings (F4)"
+setTitle.Font = Enum.Font.GothamBold
+setTitle.TextSize = 20
+setTitle.TextColor3 = Color3.new(1,1,1)
+setTitle.Parent = setF
+
+local function mkLabel(text, y)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Size = UDim2.new(0.92,0,0,18)
+    l.Position = UDim2.new(0.04,0,0,y)
+    l.Font = Enum.Font.GothamSemibold
+    l.TextSize = 14
+    l.TextColor3 = Color3.fromRGB(200,200,200)
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Text = text
+    l.Parent = setF
+end
+
+local function mkCycleBtn(y, options, default, callback)
+    local idx = 1
+    for i, v in ipairs(options) do if v == default then idx = i end end
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0.92,0,0,34)
+    b.Position = UDim2.new(0.04,0,0,y)
+    b.BackgroundColor3 = Color3.fromRGB(63,105,255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 15
+    b.TextColor3 = Color3.new(1,1,1)
+    b.Text = options[idx]
+    b.Parent = setF
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0,8)
+    b.MouseButton1Click:Connect(function()
+        playSound("Click",0.7)
+        idx = idx % #options + 1
+        b.Text = options[idx]
+        callback(options[idx])
+    end)
+end
+
+local function mkToggle(label, y, val, cb)
+    local h = Instance.new("Frame")
+    h.Size = UDim2.new(0.92,0,0,34)
+    h.Position = UDim2.new(0.04,0,0,y)
+    h.BackgroundColor3 = Color3.fromRGB(55,57,66)
+    h.Parent = setF
+    Instance.new("UICorner", h).CornerRadius = UDim.new(0,8)
+    local t = Instance.new("TextLabel")
+    t.BackgroundTransparency = 1
+    t.Size = UDim2.new(0.65,0,1,0)
+    t.Position = UDim2.new(0,10,0,0)
+    t.Font = Enum.Font.GothamBold
+    t.TextSize = 14
+    t.TextColor3 = Color3.new(1,1,1)
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Text = label
+    t.Parent = h
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0,55,0,24)
+    b.Position = UDim2.new(1,-65,0.5,-12)
+    b.BackgroundColor3 = val and Color3.fromRGB(63,105,255) or Color3.fromRGB(100,100,110)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 12
+    b.TextColor3 = Color3.new(1,1,1)
+    b.Text = val and "ON" or "OFF"
+    b.Parent = h
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0,8)
+    b.MouseButton1Click:Connect(function()
+        val = not val
+        b.Text = val and "ON" or "OFF"
+        b.BackgroundColor3 = val and Color3.fromRGB(63,105,255) or Color3.fromRGB(100,100,110)
+        cb(val)
+    end)
+end
+
+mkLabel("Purchase UI Style:", 48)
+mkCycleBtn(70, {"RobloxClone","FazoxClassic","RobloxNewByFazox","RobloxOriginal"}, CONFIG.uiChoice, function(v)
+    for _, p in pairs(prompts) do p.hideAll() end
+    CONFIG.uiChoice = v
+end)
+
+mkLabel("Notification After Purchase:", 118)
+mkCycleBtn(140, {"Both","Rose","Green","None"}, CONFIG.notifChoice, function(v)
+    if v == "None" then CONFIG.notifChoice = "Aucune"
+    else CONFIG.notifChoice = v end
+end)
+
+mkToggle("Sounds Enabled", 190, CONFIG.enableSounds, function(v) CONFIG.enableSounds = v end)
+mkToggle("Update Stand Raised", 235, CONFIG.updateStandBalance, function(v) CONFIG.updateStandBalance = v end)
+mkToggle("Debug Mode", 280, CONFIG.debugLogs, function(v) CONFIG.debugLogs = v end)
+
+local closeSetBtn = Instance.new("TextButton")
+closeSetBtn.Size = UDim2.new(0.8,0,0,36)
+closeSetBtn.Position = UDim2.new(0.1,0,1,-50)
+closeSetBtn.BackgroundColor3 = Color3.fromRGB(200,50,50)
+closeSetBtn.Font = Enum.Font.GothamBold
+closeSetBtn.TextSize = 16
+closeSetBtn.TextColor3 = Color3.new(1,1,1)
+closeSetBtn.Text = "Close"
+closeSetBtn.Parent = setF
+Instance.new("UICorner", closeSetBtn).CornerRadius = UDim.new(0,8)
+closeSetBtn.MouseButton1Click:Connect(function() setF.Visible = false end)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.F4 then setF.Visible = not setF.Visible end
+end)
+
+player.Chatted:Connect(function(msg)
+    local low = msg:lower()
+    if low == "/test" then
+        openPrompt({name = "Test Gamepass", price = 500, username = "TestPlayer"})
+    end
+end)
+
+pcall(function()
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "Fake Donate Ready",
+        Text = "F4 = Settings | Balance: "..formatNumber(CONFIG.balance),
+        Duration = 4
+    })
+end)
+
+print("✅ Fake Donate Loaded - All 4 UIs + Balance Update ✅")
